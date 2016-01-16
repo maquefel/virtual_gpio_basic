@@ -1,0 +1,13 @@
+#ifndef _VIRTUAL_GPIO_H_
+#define _VIRTUAL_GPIO_H_
+
+#define VIRTUAL_GPIO_DEV_NAME "ivshmem_gpio"
+#define VIRTUAL_GPIO_NR_GPIOS 8
+#define VIRTUAL_GPIO_DATA 0
+#define VIRTUAL_GPIO_OUT_EN 1
+#define VIRTUAL_GPIO_INT_EN 2
+#define VIRTUAL_GPIO_INT_ST 2
+#define VIRTUAL_GPIO_RISING 4
+#define VIRTUAL_GPIO_FALLING 6
+
+#endif
