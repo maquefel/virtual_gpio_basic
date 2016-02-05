@@ -30,21 +30,24 @@
 #include <fcntl.h>
 #include <getopt.h>
 
+#include <stdbool.h>
+
 #include <sys/stat.h>
 #include <sys/mman.h>
 
 #include "virtual_gpio_basic.h"
+#include "ivshmem-client.h"
 
 #define reg_size int8_t
 
 #if VIRTUAL_GPIO_NR_GPIOS != 8
-    #define reg_size int16_t
-    #if VIRTUAL_GPIO_NR_GPIOS != 16
-        #define reg_size int32_t
-        #if VIRTUAL_GPIO_NR_GPIOS != 32
-            #error only 8,16 or 32 gpios number is allowed
-        #endif
-    #endif
+#define reg_size int16_t
+#if VIRTUAL_GPIO_NR_GPIOS != 16
+#define reg_size int32_t
+#if VIRTUAL_GPIO_NR_GPIOS != 32
+#error only 8,16 or 32 gpios number is allowed
+#endif
+#endif
 #endif
 
 #define prfmt(fmt) "%s:%d:: " fmt, __func__, __LINE__
@@ -75,14 +78,23 @@ struct ivshmem_data {
     } ivshmem_op;
 };
 
+#define IVSHMEM_CLIENT_DEFAULT_VERBOSE        0
+#define IVSHMEM_CLIENT_DEFAULT_UNIX_SOCK_PATH "/tmp/ivshmem_socket"
+
+typedef struct IvshmemClientArgs {
+    bool verbose;
+    const char *unix_sock_path;
+} IvshmemClientArgs;
+
 static struct option long_options[] =
 {
-    {"version",     no_argument,        0,                  'v'},
-    {"device",      required_argument,  0,                  'd'},
-    {"write-low",   required_argument,  0,                  'l'},
-    {"write-high",  required_argument,  0,                  'i'},
-    {"help",        no_argument,        0,                  'h'},
-    {0, 0, 0, 0}
+{"version",     no_argument,        0,                  'v'},
+{"device",      required_argument,  0,                  'd'},
+{"write-low",   required_argument,  0,                  'l'},
+{"write-high",  required_argument,  0,                  'i'},
+{"peer",        required_argument,  0,                  'p'},
+{"help",        no_argument,        0,                  'h'},
+{0, 0, 0, 0}
 };
 
 
@@ -108,8 +120,58 @@ void PrintUsage(int argc, char *argv[]) {
                 "-r, --read=NR         reads corresponding gpio value, numeration starts from 0\n" \
                 "-l, --write-low=NR    write low to corresponding gpio\n" \
                 "-i, --write-high=NR   write high to corresponding gpio\n" \
+                "-p, --peer=ID         notify peer_id of interrupt\n" \
                 "-h, --help            prints this message\n");
     }
+}
+
+/* listen on stdin (command line), on unix socket (notifications of new
+ * and dead peers), and on eventfd (IRQ request) */
+static int
+ivshmem_client_get_peer(IvshmemClient *client, int peer_id)
+{
+    fd_set fds;
+    int ret, maxfd = 0;
+
+
+    do {
+        FD_ZERO(&fds);
+        maxfd = 0;
+        ivshmem_client_get_fds(client, &fds, &maxfd);
+
+        ret = select(maxfd, &fds, NULL, NULL, NULL);
+
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            fprintf(stderr, "select error: %s\n", strerror(errno));
+            break;
+        }
+        if (ret == 0) {
+            continue;
+        }
+
+        if (FD_ISSET(client->sock_fd, &fds) && ivshmem_client_handle_fds(client, &fds, maxfd) < 0) {
+            fprintf(stderr, "ivshmem_client_handle_stdin_command() failed\n");
+            break;
+        }
+
+    } while(ivshmem_client_search_peer(client, peer_id) == NULL);
+
+    return ret;
+}
+
+/* callback when we receive a notification (just display it) */
+static void ivshmem_client_notification_cb(const IvshmemClient *client,
+                               const IvshmemClientPeer *peer,
+                               unsigned vect, void *arg)
+{
+    (void)client;
+    (void)arg;
+
+    printf("receive notification from peer_id=%d vector=%u\n", peer->id, vect);
 }
 
 /**************************************************************************
@@ -127,22 +189,32 @@ void PrintUsage(int argc, char *argv[]) {
 **************************************************************************/
 int main(int argc, char **argv)
 {
+    int ret = 0;
+
     int fd;
     void *map = NULL;
     ssize_t filesize = 0;
     struct ivshmem_data ivd;
     unsigned nr;
-    unsigned val;
+    unsigned val;    
     const char *filename = NULL;
+
+    int peer_id, vector;
 
     ivd.filename = "/dev/shm/ivshmem"; /* default '/dev' node */
     ivd.filesize = 0x100000;    /* default mmio region size */
     ivd.ivshmem_op = NE_IVSHMEM_READ;   /* default op */
 
+    IvshmemClient client;
+    IvshmemClientArgs args = {
+        .verbose = IVSHMEM_CLIENT_DEFAULT_VERBOSE,
+        .unix_sock_path = IVSHMEM_CLIENT_DEFAULT_UNIX_SOCK_PATH,
+    };
+
     int c = -1;
     int option_index = 0;
 
-    while((c = getopt_long(argc, argv, "vhd:l:i:r:", long_options, &option_index)) != -1) {
+    while((c = getopt_long(argc, argv, "vhd:l:i:r:p:", long_options, &option_index)) != -1) {
         switch(c){
         case 'v' :
         {
@@ -175,6 +247,9 @@ int main(int argc, char **argv)
             ivd.ivshmem_op = NE_IVSHMEM_READ;
             break;
         }
+        case 'p':
+            peer_id = strtol(optarg, 0, 10);
+            break;
         case 'h':
             PrintUsage(argc, argv);
             exit(EXIT_SUCCESS);
@@ -184,19 +259,44 @@ int main(int argc, char **argv)
         }
     }
 
+    if(nr > VIRTUAL_GPIO_NR_GPIOS)
+    {
+        printf("Ping number is out of range. Number of gpios: %d\n", VIRTUAL_GPIO_NR_GPIOS);
+        return EINVAL;
+    }
+
     filename = ivd.filename;
     filesize = ivd.filesize;
 
-#ifdef DEBUG
-    {
-        printf("\nYou entered:\n\tfilename = \"%s\", filesize = %d, operation = %d, ",
-                     filename, (int)filesize, ivd.ivshmem_op);
-        if (ivd.ivshmem_op == NE_IVSHMEM_WRITE)
-            printf("output_string = \"%s\"\n\n", usrstrng);
-        else
-            printf("\n\n");
+    if (ivshmem_client_init(&client, args.unix_sock_path,
+                            ivshmem_client_notification_cb,
+                            NULL,
+                            args.verbose) < 0) {
+        fprintf(stderr, "cannot init client\n");
+        return 1;
     }
+
+    if (ivshmem_client_connect(&client) < 0) {
+        fprintf(stderr, "ivshmem_client: cannot connect to server.d\n");
+        exit(EXIT_FAILURE);
+    }
+
+    IvshmemClientPeer *peer = 0;
+
+    //do {
+        ivshmem_client_get_peer(&client, peer_id);
+        peer = ivshmem_client_search_peer(&client, peer_id);
+    //} while (peer == 0);
+
+
+#ifdef DEBUG
+    ivshmem_client_dump(&client);
 #endif
+
+    if (peer == NULL) {
+        printf("cannot find peer_id = %d\n", peer_id);
+        exit(EXIT_FAILURE);
+    }
 
     if ((fd = open(filename, O_RDWR)) < 0)
     {
@@ -205,48 +305,100 @@ int main(int argc, char **argv)
     }
 
     if ((map = mmap(0, filesize, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
-            0)) == (caddr_t)-1)
+                    0)) == (caddr_t)-1)
     {
         fprintf(stderr, "%s\n", strerror(errno));
         close(fd);
         exit(EXIT_FAILURE);
     }
 
-    reg_size *data, *output;
+    reg_size *data, *output, *i_en, *i_st, *r_edge, *f_edge, *eoi;
+
+    reg_size mask = (1 << nr);
 
     switch(ivd.ivshmem_op)
     {
-        case NE_IVSHMEM_READ:
-            data = map;
-            val = !!(*data & (1 << nr));
-            prinfo("read %d=%d\n", nr, val);
+    case NE_IVSHMEM_READ:
+        data = map;
+        val = !!(*data & (1 << nr));
+        prinfo("read %d=%d\n", nr, val);
+        break;
+
+    case NE_IVSHMEM_WRITE:
+        data = map;
+        output = map + VIRTUAL_GPIO_OUT_EN;
+        i_en = map + VIRTUAL_GPIO_INT_EN;
+        i_st = map + VIRTUAL_GPIO_INT_ST;
+        r_edge = map + VIRTUAL_GPIO_RISING;
+        f_edge = map + VIRTUAL_GPIO_FALLING;
+        eoi = map + VIRTUAL_GPIO_INT_EOI;        
+
+        if(!!(*output & (1 << nr)) == 1) { // rework shift to mask
+            prinfo("pin configurated as output not writing %d=%d\n", nr, val);
             break;
+        }
 
-        case NE_IVSHMEM_WRITE:
-            data = map;
-            output = map + VIRTUAL_GPIO_OUT_EN;
+        if (val)
+            *data |= (1 << nr);
+        else
+            *data &= ~(1 << nr);
 
-            if(!!(*output & (1 << nr)) == 1) {
-                prinfo("pin configurated as output not writing %d=%d\n", nr, val);
-                break;
-            }
+        prinfo("write %d=%d\n", nr, val);
 
-            if (val)
-                *data |= (1 << nr);
-            else
-                *data &= ~(1 << nr);
+        if(!!(*i_en & (1 << nr)) == 1) {
+            prinfo("interrupt was enabled for %d\n", nr);
 
-            prinfo("write %d=%d\n", nr, val);
-            break;
+            /* check if interrupt already raised */            
+            if(!!(*i_st & (1 << nr)) == 0) {
+                prinfo("interrupt was raised for %d\n", nr);
 
+                if(val && (!!(*r_edge & (1 << nr)) == 1))
+                {
+                    prinfo("rising edge interrupt was enabled for %d and new value is high %d\n", nr, val);
+
+                    /* set interrupt bit and raise interrupt */
+                    *i_st |= (1 << nr);
+                    ivshmem_client_notify(&client, peer, vector);
+                    /* wait for eoi => move to sem */
+                    /* eoi fast check and clear interrupt */
+                    /* add counter check */
+                    do {} while(!!(*eoi & (1 << nr)) != 1);
+                    *i_st &= ~(1 << nr);
+
+                    /* eoi should be always zero */
+                    *eoi &= ~(1 << nr);
+                }
+
+                if(!val && (!!(*f_edge & (1 << nr)) == 1))
+                {
+                    prinfo("falling edge interrupt was enabled for %d and new value is low %d\n", nr, val);
+
+                    /* set interrupt bit and raise interrupt */
+                    *i_st |= (1 << nr);
+                    ivshmem_client_notify(&client, peer, vector);
+                    /* wait for eoi => move to sem */
+                    /* eoi fast check and clear interrupt */
+                    /* add counter check */
+                    do {} while(!!(*eoi & (1 << nr)) != 1);
+                    *i_st &= ~(1 << nr);
+
+                    /* eoi should be always zero */
+                    *eoi &= ~(1 << nr);
+                }
+            }            
+        }
+        break;
     default:
-            prinfo("no read/write operations performed\n");
+        prinfo("no read/write operations performed\n");
     }
 
     if ((munmap(map, filesize)) < 0)
         prerr("WARNING: Failed to munmap \"%s\"\n", filename);
 
+peer_failure:
+fd_failure:
     close(fd);
+    ivshmem_client_close(&client);
 
-    return 0;
+    return ret;
 }
