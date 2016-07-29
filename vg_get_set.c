@@ -38,16 +38,18 @@
 #include "virtual_gpio_basic.h"
 #include "ivshmem-client.h"
 
-#define reg_size int8_t
-
-#if VIRTUAL_GPIO_NR_GPIOS != 8
-#define reg_size int16_t
-#if VIRTUAL_GPIO_NR_GPIOS != 16
 #define reg_size int32_t
-#if VIRTUAL_GPIO_NR_GPIOS != 32
-#error only 8,16 or 32 gpios number is allowed
+
+#ifndef BITS_PER_BYTE
+#define BITS_PER_BYTE 8
 #endif
+
+#ifndef DIV_ROUND_UP
+#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 #endif
+
+#ifndef BITS_TO_BYTES
+#define BITS_TO_BYTES(nr)       DIV_ROUND_UP(nr, BITS_PER_BYTE)
 #endif
 
 #define prfmt(fmt) "%s:%d:: " fmt, __func__, __LINE__
@@ -93,6 +95,7 @@ static struct option long_options[] =
 {"write-low",   required_argument,  0,                  'l'},
 {"write-high",  required_argument,  0,                  'i'},
 {"peer",        required_argument,  0,                  'p'},
+{"ngpio",       required_argument,  0,                  'n'},
 {"help",        no_argument,        0,                  'h'},
 {0, 0, 0, 0}
 };
@@ -121,6 +124,7 @@ void PrintUsage(int argc, char *argv[]) {
                 "-l, --write-low=NR    write low to corresponding gpio\n" \
                 "-i, --write-high=NR   write high to corresponding gpio\n" \
                 "-p, --peer=ID         notify peer_id of interrupt\n" \
+                "-n, --ngpio=CNT       specify gpio number\n" \
                 "-h, --help            prints this message\n");
     }
 }
@@ -174,6 +178,8 @@ static void ivshmem_client_notification_cb(const IvshmemClient *client,
     printf("receive notification from peer_id=%d vector=%u\n", peer->id, vect);
 }
 
+static unsigned int ngpio = VIRTUAL_GPIO_NR_GPIOS;
+
 /**************************************************************************
     Function: main
 
@@ -199,7 +205,7 @@ int main(int argc, char **argv)
     unsigned val;    
     const char *filename = NULL;
 
-    int peer_id, vector;
+    int peer_id, vector = 0;
 
     ivd.filename = "/dev/shm/ivshmem"; /* default '/dev' node */
     ivd.filesize = 0x100000;    /* default mmio region size */
@@ -214,7 +220,7 @@ int main(int argc, char **argv)
     int c = -1;
     int option_index = 0;
 
-    while((c = getopt_long(argc, argv, "vhd:l:i:r:p:", long_options, &option_index)) != -1) {
+    while((c = getopt_long(argc, argv, "vhd:l:i:r:p:n:", long_options, &option_index)) != -1) {
         switch(c){
         case 'v' :
         {
@@ -254,16 +260,20 @@ int main(int argc, char **argv)
             PrintUsage(argc, argv);
             exit(EXIT_SUCCESS);
             break;
+        case 'n':
+            ngpio = strtol(optarg, 0, 10);
         default:
             break;
         }
     }
 
-    if(nr > VIRTUAL_GPIO_NR_GPIOS)
+    if(nr > ngpio)
     {
         printf("Ping number is out of range. Number of gpios: %d\n", VIRTUAL_GPIO_NR_GPIOS);
         return EINVAL;
     }
+
+    unsigned int nbytes = BITS_TO_BYTES(ngpio);
 
     filename = ivd.filename;
     filesize = ivd.filesize;
@@ -283,11 +293,8 @@ int main(int argc, char **argv)
 
     IvshmemClientPeer *peer = 0;
 
-    //do {
-        ivshmem_client_get_peer(&client, peer_id);
-        peer = ivshmem_client_search_peer(&client, peer_id);
-    //} while (peer == 0);
-
+    ivshmem_client_get_peer(&client, peer_id);
+    peer = ivshmem_client_search_peer(&client, peer_id);
 
 #ifdef DEBUG
     ivshmem_client_dump(&client);
@@ -326,12 +333,12 @@ int main(int argc, char **argv)
 
     case NE_IVSHMEM_WRITE:
         data = map;
-        output = map + VIRTUAL_GPIO_OUT_EN;
-        i_en = map + VIRTUAL_GPIO_INT_EN;
-        i_st = map + VIRTUAL_GPIO_INT_ST;
-        r_edge = map + VIRTUAL_GPIO_RISING;
-        f_edge = map + VIRTUAL_GPIO_FALLING;
-        eoi = map + VIRTUAL_GPIO_INT_EOI;        
+        output = map + VIRTUAL_GPIO_OUT_EN*nbytes;
+        i_en = map + VIRTUAL_GPIO_INT_EN*nbytes;
+        i_st = map + VIRTUAL_GPIO_INT_ST*nbytes;
+        r_edge = map + VIRTUAL_GPIO_RISING*nbytes;
+        f_edge = map + VIRTUAL_GPIO_FALLING*nbytes;
+        eoi = map + VIRTUAL_GPIO_INT_EOI*nbytes;
 
         if(!!(*output & (1 << nr)) == 1) { // rework shift to mask
             prinfo("pin configurated as output not writing %d=%d\n", nr, val);
