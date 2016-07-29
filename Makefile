@@ -18,7 +18,7 @@ CFLAGS = `pkg-config --cflags glib-2.0`
 LDLIBS = `pkg-config --libs glib-2.0`
 
 KDIR ?= /lib/modules/$$(uname -r)/build
-QEMU_DIR ?= ../qemu-2.5.0/
+QEMU_DIR ?= /home/maquefel/projects/qemu/qemu-2.5.1.1/
 CC = $(CROSS_COMPILE)gcc
 
 vg_get_set: $(OBJS)

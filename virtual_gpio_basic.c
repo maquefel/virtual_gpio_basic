@@ -36,13 +36,30 @@
 #include <linux/slab.h>
 #include <linux/irq.h>
 #include <linux/device.h>
+#include <linux/bitops.h>
+#include <linux/gpio/driver.h>
 
 #include <linux/pci.h>
 #include "virtual_gpio_basic.h"
 
+#ifndef BITS_TO_BYTES
+#define BITS_TO_BYTES(nr)       DIV_ROUND_UP(nr, BITS_PER_BYTE)
+#endif
+
 /* ============================================================
  *                         BASIC STUFF
  * ============================================================ */
+struct virtual_gpio_offsets {
+    /* basic offsets */
+    u8 dat;
+    u8 dir;
+    /* irq offsets*/
+    u8 irqen;
+    u8 irqst;
+    u8 irqeoi;
+    u8 irqris;
+    u8 irqfal;
+};
 
 struct virtual_gpio {
     spinlock_t lock;
@@ -59,22 +76,27 @@ struct virtual_gpio {
     resource_size_t data_mmio_len;
     /* irq handling */
     unsigned int irq;
+
+    struct virtual_gpio_offsets reg_off;
 };
 
 static int modparam_gpiobase = -1/* dynamic */;
 module_param_named(gpiobase, modparam_gpiobase, int, 0444);
 MODULE_PARM_DESC(gpiobase, "The GPIO number base. -1 means dynamic, which is the default.");
 
+#define PCI_SUBVENDOR_ID_MAQUEFEL 0x0010
+#define PCI_SUBDEVICE_ID_VG8      0x0108
+#define PCI_SUBDEVICE_ID_VG16     0x0208
+#define PCI_SUBDEVICE_ID_VG32     0x0308
+
 static struct pci_device_id virtual_gpio_id_table[] = {
-{ 0x1af4, 0x1110, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+//{ 0x1af4, 0x1110, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 8 },
+{ 0x1af4, 0x1110, PCI_SUBVENDOR_ID_MAQUEFEL, PCI_SUBDEVICE_ID_VG8, 0, 0, 8 },
+{ 0x1af4, 0x1110, PCI_SUBVENDOR_ID_MAQUEFEL, PCI_SUBDEVICE_ID_VG16, 0, 0, 16 },
+{ 0x1af4, 0x1110, PCI_SUBVENDOR_ID_MAQUEFEL, PCI_SUBDEVICE_ID_VG32, 0, 0, 32 },
 { 0 },
 };
 MODULE_DEVICE_TABLE (pci, virtual_gpio_id_table);
-
-#define IVSHMEM_IRQ_ID "ivshmem_irq_id"
-
-#define vgwrite(dat, adr)	iowrite8((dat), vg->data_base_addr+(adr))
-#define vgread(adr)         ioread8(vg->data_base_addr+(adr))
 
 /*  relevant control register offsets */
 enum {
@@ -140,19 +162,19 @@ static irqreturn_t virtual_gpio_interrupt (int irq, void *data)
     unsigned long i, pending;
 
     struct virtual_gpio *vg = (struct virtual_gpio *)data;
+    struct gpio_chip *gc = &vg->chip;
 
     status = ioread32(vg->regs_base_addr + IntrStatus);
 
     if (!status || (status == 0xFFFFFFFF))
         return IRQ_NONE;
 
-
-    pending = vgread(VIRTUAL_GPIO_INT_ST);
+    pending = gc->read_reg(vg->data_base_addr + vg->reg_off.irqst);
 
     /* check if irq is really raised */
     if (pending)
     {
-        for_each_set_bit(i, &pending, VIRTUAL_GPIO_NR_GPIOS)        
+        for_each_set_bit(i, &pending, vg->chip.ngpio)
             generic_handle_irq(irq_find_mapping(vg->chip.irqdomain, i));
 
     }
@@ -163,46 +185,46 @@ static irqreturn_t virtual_gpio_interrupt (int irq, void *data)
 static void virtual_gpio_irq_ack(struct irq_data *d)
 {    
     unsigned long flags;
-    u8 nr = d->hwirq;
-    u8 mask = 1 << nr;
+    u32 nr = d->hwirq;
+    u32 mask = 1 << nr;
 
     struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
     struct virtual_gpio *vg = to_virtual_gpio(gc);
 
     spin_lock_irqsave(&vg->lock, flags);
-    vgwrite(mask, VIRTUAL_GPIO_INT_EOI);
+    gc->write_reg(vg->data_base_addr + vg->reg_off.irqeoi, mask);
     spin_unlock_irqrestore(&vg->lock, flags);
 }
 
 static void virtual_gpio_irq_mask(struct irq_data *d)
 {
-    u8 mask;
+    u32 mask;
     unsigned long flags;
-    u8 nr = d->hwirq;
+    u32 nr = d->hwirq;
 
     struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
     struct virtual_gpio *vg = to_virtual_gpio(gc);
 
     spin_lock_irqsave(&vg->lock, flags);
-    mask = vgread(VIRTUAL_GPIO_INT_EN);
+    mask = gc->read_reg(vg->data_base_addr + vg->reg_off.irqen);
     mask &= ~(1 << nr);
-    vgwrite(mask, VIRTUAL_GPIO_INT_EN);
+    gc->write_reg(vg->data_base_addr + vg->reg_off.irqen, mask);
     spin_unlock_irqrestore(&vg->lock, flags);
 }
 
 static void virtual_gpio_irq_unmask(struct irq_data *d)
 {
-    u8 mask;
+    u32 mask;
     unsigned long flags;
-    u8 nr = d->hwirq;
+    u32 nr = d->hwirq;
 
     struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
     struct virtual_gpio *vg = to_virtual_gpio(gc);
 
     spin_lock_irqsave(&vg->lock, flags);
-    mask = vgread(VIRTUAL_GPIO_INT_EN);
+    mask = gc->read_reg(vg->data_base_addr + vg->reg_off.irqen);
     mask |= (1 << nr);
-    vgwrite(mask, VIRTUAL_GPIO_INT_EN);
+    gc->write_reg(vg->data_base_addr + vg->reg_off.irqen, mask);
     spin_unlock_irqrestore(&vg->lock, flags);
 }
 
@@ -220,35 +242,35 @@ static int virtual_gpio_irq_type(struct irq_data *d, unsigned int type)
 
     irq_flow_handler_t handler;
 
-    u8 mask;
-    u8 nr = d->hwirq;
+    u32 mask;
+    u32 nr = d->hwirq;
     int retval = 0;
 
-    printk(KERN_DEBUG "virtual_gpio_irq_type irq=%u hwirq=%lu\n", d->irq, d->hwirq);
+    printk(KERN_DEBUG "virtual_gpio_irq_type irq=%u hwirq=%lu nr=%lu\n", d->irq, d->hwirq, gc->base + d->hwirq);
     /* set pin as input */
-    gpio_direction_input(nr);
+    gpio_direction_input(gc->base + d->hwirq);
 
     spin_lock_irqsave(&vg->lock, flags);
     switch (type) {
     case IRQ_TYPE_EDGE_RISING:
-        mask = vgread(VIRTUAL_GPIO_RISING);
+        mask = gc->read_reg(vg->data_base_addr + vg->reg_off.irqris);
         mask |= (1 << nr);
-        vgwrite(mask, VIRTUAL_GPIO_RISING);
+        gc->write_reg(vg->data_base_addr + vg->reg_off.irqris, mask);
 
-        mask = vgread(VIRTUAL_GPIO_FALLING);
+        mask = gc->read_reg(vg->data_base_addr + vg->reg_off.irqfal);
         mask &= ~(1 << nr);
-        vgwrite(mask, VIRTUAL_GPIO_FALLING);
+        gc->write_reg(vg->data_base_addr + vg->reg_off.irqfal, mask);
 
         handler = handle_edge_irq;
         break;
     case IRQ_TYPE_EDGE_FALLING:
-        mask = vgread(VIRTUAL_GPIO_FALLING);
+        mask = gc->read_reg(vg->data_base_addr + vg->reg_off.irqfal);
         mask |= (1 << nr);
-        vgwrite(mask, VIRTUAL_GPIO_FALLING);
+        gc->write_reg(vg->data_base_addr + vg->reg_off.irqfal, mask);
 
-        mask = vgread(VIRTUAL_GPIO_RISING);
+        mask = gc->read_reg(vg->data_base_addr + vg->reg_off.irqris);
         mask &= ~(1 << nr);
-        vgwrite(mask, VIRTUAL_GPIO_RISING);
+        gc->write_reg(vg->data_base_addr + vg->reg_off.irqris, mask);
 
         handler = handle_edge_irq;
         break;
@@ -257,12 +279,10 @@ static int virtual_gpio_irq_type(struct irq_data *d, unsigned int type)
         goto end;
     }
 
-    //irq_set_handler_locked(d, handler);
-
     /* enable interrupt */
-    mask = vgread(VIRTUAL_GPIO_INT_EN);
-    mask &= ~(1 << nr);
-    vgwrite(mask, VIRTUAL_GPIO_INT_EN);
+    mask = gc->read_reg(vg->data_base_addr + vg->reg_off.irqen);
+    mask |= (1 << nr);
+    gc->write_reg(vg->data_base_addr + vg->reg_off.irqen, mask);
 
 end:
     spin_unlock_irqrestore(&vg->lock, flags);
@@ -278,106 +298,33 @@ static struct irq_chip virtual_gpio_irq_chip = {
 };
 
 /* ============================================================
- *                  GPIO STUFF
- * ============================================================ */
-
-static int virtual_gpio_direction_input(struct gpio_chip *gpio, unsigned nr)
-{
-    struct virtual_gpio *vg = to_virtual_gpio(gpio);
-    unsigned long flags;
-    u8 outen, data;
-
-    spin_lock_irqsave(&vg->lock, flags);
-
-    data = vgread(VIRTUAL_GPIO_DATA);
-    data &= ~(1 << nr);
-    vgwrite(data, VIRTUAL_GPIO_DATA);
-
-    outen = vgread(VIRTUAL_GPIO_OUT_EN);
-    outen &= ~(1 << nr);
-    vgwrite(outen, VIRTUAL_GPIO_OUT_EN);
-
-    spin_unlock_irqrestore(&vg->lock, flags);
-
-    return 0;
-}
-
-static int virtual_gpio_get(struct gpio_chip *gpio, unsigned nr)
-{
-    struct virtual_gpio *vg = to_virtual_gpio(gpio);
-    unsigned long flags;
-    u8 data;
-
-    spin_lock_irqsave(&vg->lock, flags);
-    data = vgread(VIRTUAL_GPIO_DATA);
-    spin_unlock_irqrestore(&vg->lock, flags);
-
-    return !!(data & (1 << nr));
-}
-
-static int virtual_gpio_direction_output(struct gpio_chip *gpio,
-                                         unsigned nr, int val)
-{
-    struct virtual_gpio *vg = to_virtual_gpio(gpio);
-    unsigned long flags;
-    u8 outen, data;
-
-    spin_lock_irqsave(&vg->lock, flags);
-
-    outen = vgread(VIRTUAL_GPIO_OUT_EN);
-    outen |= (1 << nr);
-    vgwrite(outen, VIRTUAL_GPIO_OUT_EN);
-
-    data = vgread(VIRTUAL_GPIO_DATA);
-    if (val)
-        data |= (1 << nr);
-    else
-        data &= ~(1 << nr);
-    vgwrite(data, VIRTUAL_GPIO_DATA);
-
-    spin_unlock_irqrestore(&vg->lock, flags);
-
-    return 0;
-}
-
-static void virtual_gpio_set(struct gpio_chip *gpio,
-                             unsigned nr, int val)
-{
-    struct virtual_gpio *vg = to_virtual_gpio(gpio);
-    unsigned long flags;
-    u8 data;
-
-    spin_lock_irqsave(&vg->lock, flags);
-
-    data = vgread(VIRTUAL_GPIO_DATA);
-
-    if (val)
-        data |= (1 << nr);
-    else
-        data &= ~(1 << nr);
-
-    vgwrite(data, VIRTUAL_GPIO_DATA);
-
-    spin_unlock_irqrestore(&vg->lock, flags);
-}
-
-/* ============================================================
  *                  PROBE/REMOVE STUFF
  * ============================================================ */
 
-static void virtual_gpio_setup(struct virtual_gpio *vg)
+static int virtual_gpio_setup(struct virtual_gpio *vg)
 {
-    struct gpio_chip *chip = &vg->chip;    
+    struct gpio_chip *chip = &vg->chip;
+    u8 nbytes = BITS_TO_BYTES(chip->ngpio);
+
     chip->label = dev_name(&vg->pdev->dev);
     chip->owner = THIS_MODULE;
-    chip->direction_input = virtual_gpio_direction_input;
-    chip->get = virtual_gpio_get;
-    chip->direction_output = virtual_gpio_direction_output;
-    chip->set = virtual_gpio_set;
-    chip->dbg_show = NULL;
-    chip->base = modparam_gpiobase;
-    chip->ngpio = VIRTUAL_GPIO_NR_GPIOS;
+
+    /* setup regs depending on ngpio */
+    vg->reg_off.dat = nbytes*VIRTUAL_GPIO_DATA;
+    vg->reg_off.dir = nbytes*VIRTUAL_GPIO_OUT_EN;
+    vg->reg_off.irqen = nbytes*VIRTUAL_GPIO_INT_EN;
+    vg->reg_off.irqst = nbytes*VIRTUAL_GPIO_INT_ST;
+    vg->reg_off.irqeoi = nbytes*VIRTUAL_GPIO_INT_EOI;
+    vg->reg_off.irqris = nbytes*VIRTUAL_GPIO_RISING;
+    vg->reg_off.irqfal = nbytes*VIRTUAL_GPIO_FALLING;
+
+    chip->base = modparam_gpiobase;    
     chip->can_sleep = 0; // gpio never sleeps!
+    chip->dbg_show = NULL;
+#ifdef CONFIG_DEBUG_FS
+    chip->dbg_show = virtual_gpio_dbg_show;
+#endif
+    return 0;
 }
 
 static int virtual_gpio_probe(struct pci_dev *pdev,
@@ -386,6 +333,8 @@ static int virtual_gpio_probe(struct pci_dev *pdev,
     struct virtual_gpio *vg;
     struct device *dev;
     int err;
+    void __iomem *data;
+    void __iomem *dir;
 
     vg = kzalloc(sizeof(*vg), GFP_KERNEL);
     if (!vg)
@@ -449,15 +398,31 @@ static int virtual_gpio_probe(struct pci_dev *pdev,
                     vg))
         dev_err(dev, "request_irq %d error\n", pdev->irq);
 
-    virtual_gpio_setup(vg);
-    err = gpiochip_add(&vg->chip);
+    vg->chip.ngpio = pdev_id->driver_data;
+    virtual_gpio_setup(vg);    
+
+    data = vg->data_base_addr + vg->reg_off.dat;
+    dir = vg->data_base_addr + vg->reg_off.dir;
+
+
+    printk(KERN_DEBUG "bgpio_init nbytes=%u ngpio=%u\n", BITS_TO_BYTES(vg->chip.ngpio), vg->chip.ngpio);
+    err = bgpio_init(&vg->chip, dev, BITS_TO_BYTES(vg->chip.ngpio),
+                     data, NULL, NULL, dir, NULL, 0);
+
+    if (err) {
+        dev_err(dev, "Failed to register GPIOs: bgpio_init\n");
+        goto reg_release;
+    }
+
+
+    err = gpiochip_add_data(&vg->chip, 0);
 
     if (err) {
         dev_err(dev, "Failed to register GPIOs\n");
         goto reg_release;
     }
 
-    vg->chip.dev = dev;
+    vg->chip.parent = dev;
 
     err =  gpiochip_irqchip_add(&vg->chip,
                                 &virtual_gpio_irq_chip,
