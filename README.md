@@ -8,12 +8,8 @@ Virtual gpio with irq_chip module for using together with ivshmem qemu
 #REQUIREMENTS
 ------------
 
-linux kernel 4.1 (or just headers)
-
-qemu 2.5.0 with patch http://lists.gnu.org/archive/html/qemu-stable/2015-12/msg00034.html
-OR
-qemu-linaro
-
+linux kernel 4.6 (or just headers)  
+qemu 2.5.1.1 
 
 #COMPILATION
 ------------
@@ -35,8 +31,6 @@ $ qemu-system-{$ARCH} (...) -device ivshmem,shm=ivshmem,size=1
 guest machine:
 # insmod virtual_gpio_basic.ko
 
-optional parameter gpiobase=
-
 # ls /sys/class/gpio/
 export       gpiochip248  unexport
 
@@ -47,7 +41,7 @@ export       gpiochip248  unexport
 248
 
 # cat /sys/class/gpio/gpiochip248/ngpio
-8
+32
 
 # echo 248 > /sys/class/gpio/export
 # echo high > /sys/class/gpio/gpio248/direction
@@ -90,7 +84,7 @@ guest machine:
 # ./vg_guest_client 248
 gpio_chip:
         base: 248
-        ngpio: 8
+        ngpio: 32
 Added gpio 248 to watchlist.
 Added gpio 249 to watchlist.
 Added gpio 250 to watchlist.

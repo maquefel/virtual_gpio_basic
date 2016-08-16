@@ -35,8 +35,9 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 
-#include "virtual_gpio_basic.h"
 #include "ivshmem-client.h"
+
+#include "virtual_gpio_basic.h"
 
 #define reg_size int32_t
 
