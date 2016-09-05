@@ -334,12 +334,12 @@ int main(int argc, char **argv)
 
     case NE_IVSHMEM_WRITE:
         data = map;
-        output = map + VIRTUAL_GPIO_OUT_EN*nbytes;
-        i_en = map + VIRTUAL_GPIO_INT_EN*nbytes;
-        i_st = map + VIRTUAL_GPIO_INT_ST*nbytes;
-        r_edge = map + VIRTUAL_GPIO_RISING*nbytes;
-        f_edge = map + VIRTUAL_GPIO_FALLING*nbytes;
-        eoi = map + VIRTUAL_GPIO_INT_EOI*nbytes;
+        output = map + VIRTUAL_GPIO_OUT_EN;
+        i_en = map + VIRTUAL_GPIO_INT_EN;
+        i_st = map + VIRTUAL_GPIO_INT_ST;
+        r_edge = map + VIRTUAL_GPIO_RISING;
+        f_edge = map + VIRTUAL_GPIO_FALLING;
+        eoi = map + VIRTUAL_GPIO_INT_EOI;
 
         if(!!(*output & (1 << nr)) == 1) { // rework shift to mask
             prinfo("pin configurated as output not writing %d=%d\n", nr, val);
