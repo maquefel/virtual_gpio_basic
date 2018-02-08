@@ -1,17 +1,17 @@
-#DESCRIPTION
+# DESCRIPTION
 ------------
 
 Virtual gpio with irq_chip module for using together with ivshmem qemu
 
 
 
-#REQUIREMENTS
+# REQUIREMENTS
 ------------
 
 linux kernel 4.6 (or just headers)  
 qemu 2.5.1.1 
 
-#COMPILATION
+# COMPILATION
 ------------
 
 KDIR={$PATH_TO_KERNEL_SOURCE_DIRECTORY} QEMU_DIR={$PATH_TO_QEMU_SOURCES_DIRECTORY} make all
@@ -20,10 +20,10 @@ optional ARCH={$ARCH}
 optional CROSS_COMPILE={$CROSSCOMPILER_PREFIX}
 
 
-#USAGE
+# USAGE
 ------------
 
-##WITHOUT INTERRUPTS 
+## WITHOUT INTERRUPTS 
 
 ```bash
 $ qemu-system-{$ARCH} (...) -device ivshmem,shm=ivshmem,size=1
@@ -64,7 +64,7 @@ guest machine:
 1
 ```
 
-##WITH INTERRUPTS
+## WITH INTERRUPTS
 
 ```bash
 host machine:
@@ -105,7 +105,7 @@ VGPIO: interrupt (status = 0x0001)
 gpio number=248 interrupt caught
 ```
 
-#COPYRIGHT
+# COPYRIGHT
 ------------
 
 GPL
