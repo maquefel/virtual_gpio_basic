@@ -27,8 +27,8 @@ vg_get_set: $(OBJS)
 -include $(OBJS:.o=.d)
 
 %.o: %.c
-	gcc -I. -I$(QEMU_DIR) -I$(QEMU_DIR)/include -c $(CFLAGS) $*.c -o $*.o
-	gcc -I. -I$(QEMU_DIR) -I$(QEMU_DIR)/include -MM $(CFLAGS) $*.c > $*.d
+	gcc -I. -I$(QEMU_DIR) -I$(QEMU_DIR)/include -I$(QEMU_DIR)/build -c $(CFLAGS) $*.c -o $*.o
+	gcc -I. -I$(QEMU_DIR) -I$(QEMU_DIR)/include -I$(QEMU_DIR)/build -MM $(CFLAGS) $*.c > $*.d
 
 vg_guest_client:
 	$(CC) -Wall -O2 vg_guest_client.c -o vg_guest_client
