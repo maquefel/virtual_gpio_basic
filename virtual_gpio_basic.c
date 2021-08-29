@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * desc : demo linux device driver for the QEMU ivshmem GPIO PCI device
+ * Driver for the QEMU ivshmem GPIO PCI device
  *
- * Nikita Shubin
+ * Copyright (c) 2021 Nikita Shubin
  *
  * derived from:
  * file : ne_ivshmem_basic_ldd.c
@@ -13,21 +13,7 @@
  *        See git://gitorious.org/nahanni/guest-code.git
  *
  * Siro Mugabi, nairobi-embedded.org
- *
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
-
-#define pr_fmt(fmt) "%s:%d:: " fmt, __func__, __LINE__
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
@@ -61,6 +47,10 @@
 #define BITS_TO_BYTES(nr)       DIV_ROUND_UP(nr, BITS_PER_BYTE)
 #endif
 
+static int nirqs = 32;
+module_param(nirqs, int, 0644);
+MODULE_PARM_DESC(nirqs, "number of interrupts to allocate");
+
 /*
  * ============================================================
  *                         BASIC STUFF
@@ -71,18 +61,12 @@ struct virtual_gpio {
 	struct pci_dev *pdev;
 	/* gpiolib */
 	struct gpio_chip chip;
-	/* (mmio) control registers i.e. the "register memory region" */
-	void __iomem    *regs_base_addr;
-	resource_size_t regs_start;
-	resource_size_t regs_len;
 	/* data mmio region */
 	void __iomem    *data_base_addr;
-	resource_size_t data_mmio_start;
-	resource_size_t data_mmio_len;
+
 	/* irq handling */
 	unsigned int irq;
-	struct irq_chip_generic *gc;
-	struct irq_domain *irq_domain;
+	struct irq_chip ic;
 };
 
 static struct pci_device_id virtual_gpio_id_table[] = {
@@ -136,42 +120,69 @@ static void virtual_gpio_dbg_show(struct seq_file *s, struct gpio_chip *chip)
 #define virtual_gpio_dbg_show NULL
 #endif
 
-
 /*
  * ============================================================
  *                  IRQ STUFF
  * ============================================================
  */
-
-static int virtual_gpio_to_irq(struct gpio_chip *chip, unsigned int pin)
+static void virtual_gpio_interrupt(struct irq_desc *desc)
 {
-	struct virtual_gpio *vg = gpiochip_get_data(chip);
-
-	return irq_create_mapping(vg->irq_domain, pin);
-}
-
-static irqreturn_t virtual_gpio_interrupt(int irq, void *data)
-{
-	u32 status;
+	struct gpio_chip *gc = irq_desc_get_handler_data(desc);
+	struct virtual_gpio *vg = gpiochip_get_data(gc);
+	struct irq_chip *irqchip = irq_desc_get_chip(desc);
 	unsigned long i, pending;
 
-	struct virtual_gpio *vg = (struct virtual_gpio *)data;
-	struct gpio_chip *gc = &vg->chip;
-
-	status = ioread32(vg->regs_base_addr + IntrStatus);
-
-	if (!status || (status == 0xFFFFFFFF))
-		return IRQ_NONE;
-
+	chained_irq_enter(irqchip, desc);
 	pending = gc->read_reg(vg->data_base_addr + VIRTUAL_GPIO_INT_ST);
-
 	/* check if irq is really raised */
-	if (pending) {
+	if (pending)
 		for_each_set_bit(i, &pending, vg->chip.ngpio)
-			generic_handle_irq(irq_find_mapping(vg->chip.irqdomain, i));
-	}
+			generic_handle_irq(irq_find_mapping(vg->chip.irq.domain, i));
 
-	return IRQ_HANDLED;
+	chained_irq_exit(irqchip, desc);
+}
+
+static void virtual_gpio_irq_ack(struct irq_data *d)
+{
+	struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
+	struct virtual_gpio *vg = to_virtual_gpio(gc);
+	unsigned long flags;
+	u8 nr = d->hwirq;
+	u8 mask = 1 << nr;
+
+	spin_lock_irqsave(&vg->lock, flags);
+	gc->write_reg(vg->data_base_addr + VIRTUAL_GPIO_INT_EOI, mask);
+	spin_unlock_irqrestore(&vg->lock, flags);
+}
+
+static void virtual_gpio_irq_mask(struct irq_data *d)
+{
+	struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
+	struct virtual_gpio *vg = to_virtual_gpio(gc);
+	u8 mask;
+	unsigned long flags;
+	u8 nr = d->hwirq;
+
+	spin_lock_irqsave(&vg->lock, flags);
+	mask = gc->read_reg(vg->data_base_addr + VIRTUAL_GPIO_INT_EN);
+	mask &= ~(1 << nr);
+	gc->write_reg(vg->data_base_addr + VIRTUAL_GPIO_INT_EN, mask);
+	spin_unlock_irqrestore(&vg->lock, flags);
+}
+
+static void virtual_gpio_irq_unmask(struct irq_data *d)
+{
+	struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
+	struct virtual_gpio *vg = to_virtual_gpio(gc);
+	u8 mask;
+	unsigned long flags;
+	u8 nr = d->hwirq;
+
+	spin_lock_irqsave(&vg->lock, flags);
+	mask = gc->read_reg(vg->data_base_addr + VIRTUAL_GPIO_INT_EN);
+	mask |= (1 << nr);
+	gc->write_reg(vg->data_base_addr + VIRTUAL_GPIO_INT_EN, mask);
+	spin_unlock_irqrestore(&vg->lock, flags);
 }
 
 /*
@@ -181,31 +192,37 @@ static irqreturn_t virtual_gpio_interrupt(int irq, void *data)
  */
 static int virtual_gpio_irq_type(struct irq_data *d, unsigned int type)
 {
+	struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
+	struct virtual_gpio *vg = to_virtual_gpio(gc);
 	unsigned long flags;
 	int retval = 0;
-
-	struct irq_chip_generic *gc = irq_data_get_irq_chip_data(d);
-	struct virtual_gpio *vg = gc->private;
-	struct gpio_chip *chip = &vg->chip;
-
+	int offset = d->hwirq & (BIT(VIRTUAL_GPIO_NR_GPIOS) - 1);
+	int port_mask = BIT(offset);
 	u32 mask;
 
-	dev_dbg(&vg->pdev->dev, "%s : irq=%u hwirq=%lu nr=%lu\n", __func__, d->irq, d->hwirq, gc->irq_base + d->hwirq);
+	dev_dbg(&vg->pdev->dev, "%s : irq=%u hwirq=%lu type=%u\n", __func__, d->irq, d->hwirq, type);
+
+	gpio_direction_input(gc->base + d->hwirq);
 
 	spin_lock_irqsave(&vg->lock, flags);
-
 	switch (type) {
 	case IRQ_TYPE_EDGE_RISING:
-		mask = chip->read_reg(vg->data_base_addr + VIRTUAL_GPIO_RISING);
-		chip->write_reg(vg->data_base_addr + VIRTUAL_GPIO_RISING, mask | d->mask);
-			mask = chip->read_reg(vg->data_base_addr + VIRTUAL_GPIO_FALLING);
-		chip->write_reg(vg->data_base_addr + VIRTUAL_GPIO_FALLING, mask & ~d->mask);
+		mask = gc->read_reg(vg->data_base_addr + VIRTUAL_GPIO_RISING);
+		gc->write_reg(vg->data_base_addr + VIRTUAL_GPIO_RISING, mask | port_mask);
+		mask = gc->read_reg(vg->data_base_addr + VIRTUAL_GPIO_FALLING);
+		gc->write_reg(vg->data_base_addr + VIRTUAL_GPIO_FALLING, mask & ~port_mask);
 		break;
 	case IRQ_TYPE_EDGE_FALLING:
-		mask = chip->read_reg(vg->data_base_addr + VIRTUAL_GPIO_FALLING);
-		chip->write_reg(vg->data_base_addr + VIRTUAL_GPIO_FALLING, mask | d->mask);
-			mask = chip->read_reg(vg->data_base_addr + VIRTUAL_GPIO_RISING);
-		chip->write_reg(vg->data_base_addr + VIRTUAL_GPIO_RISING, mask & ~d->mask);
+		mask = gc->read_reg(vg->data_base_addr + VIRTUAL_GPIO_FALLING);
+		gc->write_reg(vg->data_base_addr + VIRTUAL_GPIO_FALLING, mask | port_mask);
+		mask = gc->read_reg(vg->data_base_addr + VIRTUAL_GPIO_RISING);
+		gc->write_reg(vg->data_base_addr + VIRTUAL_GPIO_RISING, mask & ~port_mask);
+		break;
+	case IRQ_TYPE_EDGE_BOTH:
+		mask = gc->read_reg(vg->data_base_addr + VIRTUAL_GPIO_RISING);
+		gc->write_reg(vg->data_base_addr + VIRTUAL_GPIO_RISING, mask | port_mask);
+		mask = gc->read_reg(vg->data_base_addr + VIRTUAL_GPIO_FALLING);
+		gc->write_reg(vg->data_base_addr + VIRTUAL_GPIO_FALLING, mask | port_mask);
 		break;
 	default:
 		retval = -EINVAL;
@@ -213,8 +230,8 @@ static int virtual_gpio_irq_type(struct irq_data *d, unsigned int type)
 	}
 
 	/* enable interrupt */
-	mask = chip->read_reg(vg->data_base_addr + VIRTUAL_GPIO_INT_EN);
-	chip->write_reg(vg->data_base_addr + VIRTUAL_GPIO_INT_EN, mask | d->mask);
+	mask = gc->read_reg(vg->data_base_addr + VIRTUAL_GPIO_INT_EN);
+	gc->write_reg(vg->data_base_addr + VIRTUAL_GPIO_INT_EN, mask | port_mask);
 end:
 	spin_unlock_irqrestore(&vg->lock, flags);
 	return retval;
@@ -224,233 +241,131 @@ end:
  *                  PROBE/REMOVE STUFF
  * ============================================================
  */
-
-static int virtual_gpio_setup(struct virtual_gpio *vg)
+static int virtual_gpio_setup(struct pci_dev *pdev,
+				  struct virtual_gpio *vg,
+				  int irq)
 {
-	struct gpio_chip *chip = &vg->chip;
+	void __iomem *data = vg->data_base_addr + VIRTUAL_GPIO_DATA;
+	void __iomem *dir = vg->data_base_addr + VIRTUAL_GPIO_OUT_EN;
+	struct gpio_chip *gc = &vg->chip;
+	struct device *dev = &pdev->dev;
+	struct gpio_irq_chip *girq = &gc->irq;
+	struct irq_chip *ic = &vg->ic;
+	int err;
 
-	chip->label = dev_name(&vg->pdev->dev);
-	chip->owner = THIS_MODULE;
-	chip->can_sleep = 0; // gpio never sleeps!
-	chip->dbg_show = NULL;
-	#ifdef CONFIG_DEBUG_FS
-	chip->dbg_show = virtual_gpio_dbg_show;
-	#endif
-	return 0;
+	gc->label = dev_name(&vg->pdev->dev);
+	gc->owner = THIS_MODULE;
+	gc->can_sleep = 0; // gpio never sleeps!
+	gc->dbg_show = NULL;
+#ifdef CONFIG_DEBUG_FS
+	gc->dbg_show = virtual_gpio_dbg_show;
+#endif
+
+	err = bgpio_init(gc, dev, BITS_TO_BYTES(VIRTUAL_GPIO_NR_GPIOS), data, NULL, NULL, dir, NULL, 0);
+	if (err)
+		return err;
+
+	ic->irq_ack = virtual_gpio_irq_ack;
+	ic->irq_mask = virtual_gpio_irq_mask;
+	ic->irq_unmask = virtual_gpio_irq_unmask;
+	ic->irq_set_type = virtual_gpio_irq_type;
+	girq->chip = ic;
+
+	girq->parent_handler = virtual_gpio_interrupt;
+	girq->num_parents = 1;
+	girq->parents = devm_kcalloc(dev, girq->num_parents,
+				     sizeof(*girq->parents),
+				     GFP_KERNEL);
+	if (!girq->parents)
+		return -ENOMEM;
+
+	girq->default_type = IRQ_TYPE_NONE;
+	girq->handler = handle_edge_irq;
+	girq->parents[0] = irq;
+
+	vg->irq = irq;
+
+	return devm_gpiochip_add_data(dev, gc, vg);
 }
 
 static int virtual_gpio_probe(struct pci_dev *pdev,
 			const struct pci_device_id *pdev_id)
 {
 	struct virtual_gpio *vg;
-	struct device *dev;
-	struct irq_chip_generic *gc;
-	struct irq_chip_type *ct;
-	int irq_base;
+	struct device *dev = &pdev->dev;
+	int nvecs;
+	int err = 0;
+	int irq;
+	void __iomem *regs_base_addr;
 
-	int err;
-	void __iomem *data;
-	void __iomem *dir;
+	pr_err("%s : hello\n", __func__);
 
 	vg = devm_kzalloc(&pdev->dev, sizeof(*vg), GFP_KERNEL);
 
 	if (!vg)
 		return -ENOMEM;
 
+	pci_set_drvdata(pdev, vg);
+
 	vg->pdev = pdev;
 	spin_lock_init(&vg->lock);
 
-	dev = &pdev->dev;
-	gc = vg->gc;
+	err = pcim_enable_device(pdev);
+	if (err)
+		return err;
 
-	err = pci_enable_device(pdev);
+	err = pcim_iomap_regions(pdev, BIT(2) | BIT(0), VIRTUAL_GPIO_DEV_NAME);
 	if (err) {
-		dev_err(dev, "pci_enable_device probe error %d for device %s\n",
-			err, pci_name(pdev));
+		dev_err(dev, "I/O memory mapping error\n");
 		return err;
 	}
 
-	err = pci_request_regions(pdev, VIRTUAL_GPIO_DEV_NAME);
-	if (err < 0) {
-		dev_err(dev, "pci_request_regions error %d\n", err);
-		goto pci_disable;
-	}
+	/* BAR2: data mmio region */
+	vg->data_base_addr = pcim_iomap_table(pdev)[2];
 
-	/* bar2: data mmio region */
-	vg->data_mmio_start = pci_resource_start(pdev, 2);
-	vg->data_mmio_len   = pci_resource_len(pdev, 2);
-	vg->data_base_addr = ioremap_nocache(vg->data_mmio_start, vg->data_mmio_len);
-
-
-	if (!vg->data_base_addr) {
-		dev_err(dev, "cannot iomap region of size %lu\n",
-			(unsigned long)vg->data_mmio_len);
-		goto pci_release;
-	}
-
-	dev_dbg(dev, "data_mmio iomap base = 0x%lx\n",
-		(unsigned long) vg->data_base_addr);
-
-	dev_dbg(dev, "data_mmio_start = 0x%lx data_mmio_len = %lu\n",
-		(unsigned long)vg->data_mmio_start,
-		(unsigned long)vg->data_mmio_len);
-
-	/* bar0: control registers */
-	vg->regs_start =  pci_resource_start(pdev, 0);
-	vg->regs_len = pci_resource_len(pdev, 0);
-	vg->regs_base_addr = pci_iomap(pdev, 0, 0x100);
-	if (!vg->regs_base_addr) {
-		dev_err(dev, "cannot ioremap registers of size %lu\n",
-			(unsigned long)vg->regs_len);
-		goto reg_release;
-	}
+	/* BAR0: control registers */
+	regs_base_addr = pcim_iomap_table(pdev)[0];
 
 	/* interrupts: set all masks */
-	iowrite32(0xffff, vg->regs_base_addr + IntrMask);
+	iowrite32(0xffff, regs_base_addr + IntrMask);
 
-	if (request_irq(pdev->irq,
-		virtual_gpio_interrupt,
-		IRQF_SHARED,
-		VIRTUAL_GPIO_DEV_NAME,
-		vg))
-		dev_err(dev, "request_irq %d error\n", pdev->irq);
+	/* Release the IO mapping, since we already get the info from BAR0 */
+	pcim_iounmap_regions(pdev, BIT(0));
 
-	vg->chip.ngpio = VIRTUAL_GPIO_NR_GPIOS;
-	virtual_gpio_setup(vg);
+	if (nirqs < 1)
+		nirqs = 1;
 
-	data = vg->data_base_addr + VIRTUAL_GPIO_DATA;
-	dir = vg->data_base_addr + VIRTUAL_GPIO_OUT_EN;
+	nvecs = pci_alloc_irq_vectors(pdev, 1, nirqs, PCI_IRQ_ALL_TYPES);
+	if (nvecs < 0)
+		return nvecs;
 
-	dev_dbg(dev, "bgpio_init nbytes=%u ngpio=%u\n", BITS_TO_BYTES(vg->chip.ngpio), vg->chip.ngpio);
+	dev_dbg(dev, "nvecs=%d\n", nvecs);
 
-	vg->chip.to_irq = virtual_gpio_to_irq;
-	err = bgpio_init(&vg->chip, dev, BITS_TO_BYTES(vg->chip.ngpio),
-			data, NULL, NULL, dir, NULL, 0);
-	if (err) {
-		dev_err(dev, "Failed to register GPIOs: bgpio_init\n");
-		goto reg_release;
-	}
+	irq = pci_irq_vector(pdev, 0);
+	if (irq < 0)
+		return irq;
 
-	err = devm_gpiochip_add_data(&pdev->dev, &vg->chip, vg);
-	if (err) {
-		dev_err(dev, "Failed to register GPIOs\n");
-		goto reg_release;
-	}
+	err = virtual_gpio_setup(pdev, vg, irq);
+	if (err)
+		return err;
 
-	vg->chip.parent = dev;
-
-	irq_base = irq_alloc_descs(-1, 0, vg->chip.ngpio, 0);
-	if (irq_base < 0) {
-		err = irq_base;
-		goto desc_release;
-	}
-
-	vg->irq_domain = irq_domain_add_linear(0, vg->chip.ngpio, &irq_domain_simple_ops, vg);
-	if (!vg->irq_domain) {
-		err = -ENXIO;
-		dev_err(&pdev->dev, "cannot initialize irq domain\n");
-		goto desc_release;
-	}
-
-	irq_domain_associate_many(vg->irq_domain, irq_base, 0, vg->chip.ngpio);
-
-	gc = irq_alloc_generic_chip(VIRTUAL_GPIO_DEV_NAME, 1, irq_base, vg->data_base_addr, handle_edge_irq);
-	if (!gc) {
-		dev_err(dev, "irq_alloc_generic_chip failed!\n");
-		goto chip_release;
-	}
-
-	gc->private = vg;
-
-	ct = gc->chip_types;
-	vg->gc = gc;
-
-	ct->type = IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING;
-
-	ct->chip.name = VIRTUAL_GPIO_DEV_NAME;
-	ct->chip.irq_ack = irq_gc_ack_set_bit;
-	ct->chip.irq_mask = irq_gc_mask_clr_bit;
-	ct->chip.irq_unmask = irq_gc_mask_set_bit;
-	ct->chip.irq_set_type = virtual_gpio_irq_type;
-
-	ct->regs.ack = VIRTUAL_GPIO_INT_EOI;
-	ct->regs.mask = VIRTUAL_GPIO_INT_EN;
-
-	irq_setup_generic_chip(gc, IRQ_MSK(VIRTUAL_GPIO_NR_GPIOS), 0, 0, 0);
-
-	vg->chip.irqdomain = vg->irq_domain;
-
-	gpiochip_set_chained_irqchip(&vg->chip, &ct->chip, pdev->irq, NULL);
-
-	pci_set_drvdata(pdev, vg);
-
-	dev_dbg(dev, "regs iomap base = 0x%lx, irq = %u\n",
-		(unsigned long)vg->regs_base_addr, pdev->irq);
-	dev_dbg(dev, "regs_addr_start = 0x%lx regs_len = %lu\n",
-		(unsigned long)vg->regs_start,
-		(unsigned long)vg->regs_len);
-	dev_dbg(dev, "generic chip irq base = 0x%lx\n",
-		(unsigned long)gc->irq_base);
+	dev_info(dev, "loaded\n");
 
 	return 0;
-
-chip_release:
-	free_irq(pdev->irq, vg);
-	irq_remove_generic_chip(vg->gc, 0, 0, 0);
-	kfree(vg->gc);
-desc_release:
-	irq_free_descs(gc->irq_base, vg->chip.ngpio);
-	pci_iounmap(pdev, vg->regs_base_addr);
-reg_release:
-	pci_iounmap(pdev, vg->data_base_addr);
-	pci_set_drvdata(pdev, NULL);
-pci_release:
-	pci_release_regions(pdev);
-pci_disable:
-	pci_disable_device(pdev);
-	return -EBUSY;
-}
-
-static void virtual_gpio_remove(struct pci_dev *pdev)
-{
-	struct virtual_gpio *vg = pci_get_drvdata(pdev);
-
-	dev_dbg(&pdev->dev, "Unregister virtual_gpio device.\n");
-	free_irq(pdev->irq, vg);
-	irq_remove_generic_chip(vg->gc, IRQ_MSK(VIRTUAL_GPIO_NR_GPIOS), IRQ_NOREQUEST | IRQ_NOPROBE, 0);
-	kfree(vg->gc);
-	irq_free_descs(vg->gc->irq_base, vg->chip.ngpio);
-	pci_iounmap(pdev, vg->regs_base_addr);
-	pci_iounmap(pdev, vg->data_base_addr);
-	pci_set_drvdata(pdev, NULL);
-	pci_release_regions(pdev);
-	pci_disable_device(pdev);
 }
 
 static struct pci_driver virtual_gpio_pci_driver = {
 	.name      = VIRTUAL_GPIO_DEV_NAME,
 	.id_table  = virtual_gpio_id_table,
 	.probe     = virtual_gpio_probe,
-	.remove    = virtual_gpio_remove,
 };
 
 /* ============================================================
  *                  MODULE INIT/EXIT
  * ============================================================
  */
-static int __init virtual_gpio_init(void)
-{
-	return pci_register_driver(&virtual_gpio_pci_driver);
-}
-
-static void __exit virtual_gpio_fini(void)
-{
-	pci_unregister_driver(&virtual_gpio_pci_driver);
-}
-
-module_init(virtual_gpio_init);
-module_exit(virtual_gpio_fini);
+module_pci_driver(virtual_gpio_pci_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Nikita Shubin <maquefel@gmail.com>");
-MODULE_DESCRIPTION("Demo module for QEMU ivshmem virtual pci device");
+MODULE_DESCRIPTION("QEMU ivshmem virtual pci device");
