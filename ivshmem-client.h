@@ -6,8 +6,8 @@
  * top-level directory.
  */
 
-#ifndef _IVSHMEM_CLIENT_H_
-#define _IVSHMEM_CLIENT_H_
+#ifndef IVSHMEM_CLIENT_H
+#define IVSHMEM_CLIENT_H
 
 /**
  * This file provides helper to implement an ivshmem client. It is used
@@ -19,9 +19,8 @@
  * purposes.
  */
 
-#include <limits.h>
 #include <sys/select.h>
-#include <stdbool.h>
+#include <linux/limits.h>
 
 #include "qemu/queue.h"
 #include "hw/misc/ivshmem.h"
@@ -43,14 +42,12 @@
  * client in (IvshmemClient)->local.
  */
 typedef struct IvshmemClientPeer {
-    QTAILQ_ENTRY(IvshmemClientPeer) next;    /**< next in list*/
-    int64_t id;                              /**< the id of the peer */
-    int vectors[IVSHMEM_CLIENT_MAX_VECTORS]; /**< one fd per vector */
-    unsigned vectors_count;                  /**< number of vectors */
+	QTAILQ_ENTRY(IvshmemClientPeer) next;    /**< next in list*/
+	int64_t id;                              /**< the id of the peer */
+	int vectors[IVSHMEM_CLIENT_MAX_VECTORS]; /**< one fd per vector */
+	unsigned vectors_count;                  /**< number of vectors */
 } IvshmemClientPeer;
-QTAILQ_HEAD(IvshmemClientPeerList, IvshmemClientPeer);
 
-typedef struct IvshmemClientPeerList IvshmemClientPeerList;
 typedef struct IvshmemClient IvshmemClient;
 
 /**
@@ -58,9 +55,9 @@ typedef struct IvshmemClient IvshmemClient;
  * notification from a peer.
  */
 typedef void (*IvshmemClientNotifCb)(
-    const IvshmemClient *client,
-    const IvshmemClientPeer *peer,
-    unsigned vect, void *arg);
+	const IvshmemClient *client,
+	const IvshmemClientPeer *peer,
+	unsigned vect, void *arg);
 
 /**
  * Structure describing an ivshmem client
@@ -71,17 +68,17 @@ typedef void (*IvshmemClientNotifCb)(
  * callback function used when we receive a notification from a peer.
  */
 struct IvshmemClient {
-    char unix_sock_path[PATH_MAX];      /**< path to unix sock */
-    int sock_fd;                        /**< unix sock filedesc */
-    int shm_fd;                         /**< shm file descriptor */
-
-    IvshmemClientPeerList peer_list;    /**< list of peers */
-    IvshmemClientPeer local;            /**< our own infos */
-
-    IvshmemClientNotifCb notif_cb;      /**< notification callback */
-    void *notif_arg;                    /**< notification argument */
-
-    bool verbose;                       /**< true to enable debug */
+	char unix_sock_path[PATH_MAX];      /**< path to unix sock */
+	int sock_fd;                        /**< unix sock filedesc */
+	int shm_fd;                         /**< shm file descriptor */
+	
+	QTAILQ_HEAD(, IvshmemClientPeer) peer_list;    /**< list of peers */
+	IvshmemClientPeer local;            /**< our own infos */
+	
+	IvshmemClientNotifCb notif_cb;      /**< notification callback */
+	void *notif_arg;                    /**< notification argument */
+	
+	bool verbose;                       /**< true to enable debug */
 };
 
 /**
@@ -98,8 +95,8 @@ struct IvshmemClient {
  * Returns:         0 on success, or a negative value on error
  */
 int ivshmem_client_init(IvshmemClient *client, const char *unix_sock_path,
-                        IvshmemClientNotifCb notif_cb, void *notif_arg,
-                        bool verbose);
+			IvshmemClientNotifCb notif_cb, void *notif_arg,
+			bool verbose);
 
 /**
  * Connect to the server
@@ -135,7 +132,7 @@ void ivshmem_client_close(IvshmemClient *client);
  *          updated if this function adds a greater fd in fd_set.
  */
 void ivshmem_client_get_fds(const IvshmemClient *client, fd_set *fds,
-                            int *maxfd);
+			    int *maxfd);
 
 /**
  * Read and handle new messages
@@ -163,7 +160,7 @@ int ivshmem_client_handle_fds(IvshmemClient *client, fd_set *fds, int maxfd);
  * Returns: 0 on success, or a negative value on error
  */
 int ivshmem_client_notify(const IvshmemClient *client,
-                          const IvshmemClientPeer *peer, unsigned vector);
+			  const IvshmemClientPeer *peer, unsigned vector);
 
 /**
  * Send a notification to all vectors of a peer
@@ -175,10 +172,10 @@ int ivshmem_client_notify(const IvshmemClient *client,
  *          notification failed)
  */
 int ivshmem_client_notify_all_vects(const IvshmemClient *client,
-                                    const IvshmemClientPeer *peer);
+				    const IvshmemClientPeer *peer);
 
 /**
- * Broadcat a notification to all vectors of all peers
+ * Broadcast a notification to all vectors of all peers
  *
  * @client: The ivshmem client
  *
@@ -211,4 +208,4 @@ ivshmem_client_search_peer(IvshmemClient *client, int64_t peer_id);
  */
 void ivshmem_client_dump(const IvshmemClient *client);
 
-#endif /* _IVSHMEM_CLIENT_H_ */
+#endif /* IVSHMEM_CLIENT_H */
