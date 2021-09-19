@@ -81,7 +81,7 @@ struct ivshmem_data {
     } ivshmem_op;
 };
 
-#define IVSHMEM_CLIENT_DEFAULT_VERBOSE        0
+#define IVSHMEM_CLIENT_DEFAULT_VERBOSE        1
 #define IVSHMEM_CLIENT_DEFAULT_UNIX_SOCK_PATH "/tmp/ivshmem_socket"
 
 typedef struct IvshmemClientArgs {
@@ -358,7 +358,7 @@ int main(int argc, char **argv)
 
             /* check if interrupt already raised */            
             if(!!(*i_st & (1 << nr)) == 0) {
-                prinfo("interrupt was raised for %d\n", nr);
+                prinfo("interrupt was raised for %d r_edge=0x%x f_edge=0x%x\n", nr, *r_edge, *f_edge);
 
                 if(val && (!!(*r_edge & (1 << nr)) == 1))
                 {
