@@ -17,9 +17,12 @@ else
 CFLAGS = `pkg-config --cflags glib-2.0` 
 LDLIBS = `pkg-config --libs glib-2.0`
 
-KDIR ?= /lib/modules/$$(uname -r)/build
-QEMU_DIR ?= /home/maquefel/projects/qemu/qemu-2.5.1.1/
+KDIR ?= ${CURDIR}/../linux
+QEMU_DIR ?= ${CURDIR}/../qemu
+SYSROOT ?= ${CURDIR}/../initramfs
 CC = $(CROSS_COMPILE)gcc
+
+LINUXCONFIG     += DEBUG=1
 
 vg_get_set: $(OBJS)
 	gcc $(OBJS) -o vg_get_set $(LDLIBS)
@@ -30,17 +33,17 @@ vg_get_set: $(OBJS)
 	gcc -I. -I$(QEMU_DIR) -I$(QEMU_DIR)/include -I$(QEMU_DIR)/build -c $(CFLAGS) $*.c -o $*.o
 	gcc -I. -I$(QEMU_DIR) -I$(QEMU_DIR)/include -I$(QEMU_DIR)/build -MM $(CFLAGS) $*.c > $*.d
 
-vg_guest_client:
-	$(CC) -Wall -O2 vg_guest_client.c -o vg_guest_client
+modules:
+	$(MAKE) $(LINUXCONFIG) -C $(KDIR) M=$$PWD modules
 
-module:
-	$(MAKE) -C $(KDIR) M=$$PWD modules
+modules_install:
+	$(MAKE) -C $(KDIR) M=$$PWD INSTALL_MOD_PATH=${SYSROOT} modules_install
 
 clean:
 	$(MAKE) -C $(KDIR) M=$$PWD clean
 	rm -f $(usr)
 
-all: module vg_get_set vg_guest_client
+all: modules vg_get_set vg_guest_client
 
 debug: CFLAGS += -DDEBUG -g
 debug: vg_get_set
