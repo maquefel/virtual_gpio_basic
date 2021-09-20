@@ -21,6 +21,10 @@ KDIR={$PATH_TO_KERNEL_SOURCE_DIRECTORY} QEMU_DIR={$PATH_TO_QEMU_SOURCES_DIRECTOR
 optional ARCH={$ARCH}
 optional CROSS_COMPILE={$CROSSCOMPILER_PREFIX}
 
+# QUICKSTART
+
+Use https://github.com/maquefel/kernel-bisect-template/tree/virtual_gpio project for quickstart.
+
 # USAGE
 
 I have dropped non-irq based version and switched to MSI vector usage. The modules simply won't load with error (it can be fixed easily if you really require that).
