@@ -1,112 +1,67 @@
 # DESCRIPTION
-------------
 
-Virtual gpio with irq_chip module for using together with ivshmem qemu
+PCI virtual gpio with interrupts support for using together with ivshmem qemu
 
+See original articles for older versions:
 
+- http://maquefel.me/en/qemu-ivshmem-introducing-interrupt-capable-virtual-gpio-concept/
+- http://maquefel.me/en/using-gpio-generic-and-irq_chip_generic-subsystems-for-gpio-driver/
 
 # REQUIREMENTS
-------------
 
-linux kernel 4.6 (or just headers)  
-qemu 2.5.1.1 
+- linux kernel
+- qemu
+
+This version is done for usage with 5.12 linux kernel and 6.0 qemu
 
 # COMPILATION
-------------
 
 KDIR={$PATH_TO_KERNEL_SOURCE_DIRECTORY} QEMU_DIR={$PATH_TO_QEMU_SOURCES_DIRECTORY} make all
 
 optional ARCH={$ARCH}
 optional CROSS_COMPILE={$CROSSCOMPILER_PREFIX}
 
-
 # USAGE
-------------
 
-## WITHOUT INTERRUPTS 
+I have dropped non-irq based version and switched to MSI vector usage. The modules simply won't load with error (it can be fixed easily if you really require that).
 
-```bash
-$ qemu-system-{$ARCH} (...) -device ivshmem,shm=ivshmem,size=1
-
-guest machine:
-# insmod virtual_gpio_basic.ko
-
-# ls /sys/class/gpio/
-export       gpiochip248  unexport
-
-# cat /sys/class/gpio/gpiochip248/label
-0000:00:0d.0
-
-# cat /sys/class/gpio/gpiochip248/base
-248
-
-# cat /sys/class/gpio/gpiochip248/ngpio
-32
-
-# echo 248 > /sys/class/gpio/export
-# echo high > /sys/class/gpio/gpio248/direction
-
-host machine:
-$ xxd -b -l 2 -c 2 /dev/shm/ivshmem
-0000000: 00000001 00000001  ..
-
-vg_get_set:
-
-$ ./vg_get_set -r 0
-main:222:: read 0=1
-
-$ ./vg_get_set -i 1
-main:239:: write 1=1
-
-guest machine:
-
-# cat gpio1/value
-1
-```
+See https://github.com/qemu/qemu/blob/master/docs/specs/ivshmem-spec.txt for additional info.
 
 ## WITH INTERRUPTS
 
-```bash
+```
 host machine:
-$ ivshmem-server -F -v -l 1M -n 1
-$ qemu-system-{$ARCH} (...) -chardev socket,path=/tmp/ivshmem_socket,id=ivshmemid -device ivshmem,chardev=ivshmemid,size=1,msi=off
+$ ./qemu/build/contrib/ivshmem-server/ivshmem-server -F -v -l 1M -n 1
+$ qemu-system-x86_64 -cpu host -kernel build-linux/arch/x86/boot/bzImage -initrd initramfs.cpio.xz -nographic -append "nokaslr console=ttyS0 root=/dev/ram" -chardev socket,path=/tmp/ivshmem_socket,id=ivshmemid -device ivshmem-doorbell,chardev=ivshmemid,vectors=1 -enable-kvm
 
-guest machine:
-# insmod virtual_gpio_basic.ko
+guest # lsgpio
+...
+GPIO chip: gpiochip4, "0000:00:04.0", 32 GPIO lines
+        line  0: unnamed unused [input]
+        line  1: unnamed unused [input]
+        line  2: unnamed unused [input]
+        line  3: unnamed unused [input]
+...
 
-# echo 248 > /sys/class/gpio/export
-# echo 249 > /sys/class/gpio/export
-# echo 250 > /sys/class/gpio/export
-# echo rising > /sys/class/gpio/gpio248/edge
-# echo rising > /sys/class/gpio/gpio249/edge
-# echo rising > /sys/class/gpio/gpio250/edge
+guest # /usr/bin/gpio-event-mon -n gpiochip4 -o 0
 
-# ./vg_guest_client 248
-gpio_chip:
-        base: 248
-        ngpio: 32
-Added gpio 248 to watchlist.
-Added gpio 249 to watchlist.
-Added gpio 250 to watchlist.
-Entering loop with 3 gpios.
-
-host machine:
-$ ./vg_get_set -p 6 -i 0 # get -p (peer id) from ivshmem-client
+host $ ./vg_get_set -p 6 -i 0 # get -p (peer id) from ivshmem-client
 main:346:: write 0=1
 main:349:: interrupt was enabled for 0
 main:353:: interrupt was raised for 0
 main:357:: rising edge interrupt was enabled for 0 and new value is high 1
 
 guest:
+No flags specified, listening on both rising and falling edges
+Monitoring line 0 on gpiochip4
+Initial line value: 0
 
-VGPIO: interrupt (status = 0x0001, pending = 1)
-VGPIO: interrupt (status = 0x0001)
-VGPIO: interrupt (status = 0x0001)
-gpio number=248 interrupt caught
+GPIO EVENT at 33533945213 on line 0 (1|1) rising edge
+GPIO EVENT at 39910880760 on line 0 (2|2) falling edge
+GPIO EVENT at 44507121043 on line 0 (3|3) rising edge
 ```
 
 # COPYRIGHT
-------------
 
 GPL
-Nikita Shubin <maquefel@gmail.com>
+Nikita Shubin <nikita.shubin@maquefel.me>
